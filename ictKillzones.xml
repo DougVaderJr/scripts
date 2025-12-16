@@ -1,0 +1,192 @@
+using System;
+using System.Drawing;
+using TradingPlatform.BusinessLayer;
+
+namespace ICT_Killzones_Quantower_Pro
+{
+    public class ICT_Killzones_Pro : Indicator
+    {
+        // ────────────────────────────────────── INPUTS ──────────────────────────────────────
+        [Input("Timezone", Group = "General")]
+        public TimeZoneInfo TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+
+        [Input("Show Asia Killzone (20:00–00:00 EST)", Group = "Killzones")]
+        public bool ShowAsia = true;
+
+        [Input("Asia Box Color", Group = "Killzones")]
+        public Color AsiaColor = Color.FromArgb(100, 0, 0, 255); // Semi-transparent blue
+
+        [Input("Show London Killzone (02:00–05:00 EST)", Group = "Killzones")]
+        public bool ShowLondon = true;
+
+        [Input("London Box Color", Group = "Killzones")]
+        public Color LondonColor = Color.FromArgb(120, 255, 0, 0); // Red
+
+        [Input("Show NY Forex Killzone (07:00–10:00 EST)", Group = "Killzones")]
+        public bool ShowNYForex = true;
+
+        [Input("NY Forex Box Color", Group = "Killzones")]
+        public Color NYForexColor = Color.FromArgb(100, 0, 128, 0); // Dark green
+
+        [Input("Show NY Indices Killzone (09:30–11:00 EST)", Group = "Killzones")]
+        public bool ShowNYIndices = false;
+
+        [Input("NY Indices Box Color", Group = "Killzones")]
+        public Color NYIndicesColor = Color.FromArgb(110, 128, 0, 128); // Purple
+
+        [Input("Show High/Low Pivots", Group = "Pivots")]
+        public bool ShowPivots = true;
+
+        [Input("Pivot Line Width", Group = "Pivots")]
+        public int PivotWidth = 2;
+
+        [Input("Show Midpoint", Group = "Pivots")]
+        public bool ShowMidpoint = false;
+
+        [Input("Box Transparency (0 = opaque, 100 = very transparent)", Group = "Appearance")]
+        public int BoxTransparency = 80;
+
+        [Input("Show Labels Inside Boxes", Group = "Appearance")]
+        public bool ShowLabels = true;
+
+        // ────────────────────────────────────── CONSTRUCTOR ──────────────────────────────────────
+        public ICT_Killzones_Pro()
+        {
+            Name = "ICT Killzones Pro (True Times)";
+            Description = "Asia 20:00–00:00 | London 02:00–05:00 | NY 07:00–10:00 (Forex) / 09:30–11:00 (Indices) EST";
+            IsUpdateTypesEnabled = true;
+            SeparateWindow = false;
+
+            // Dummy line to prevent "no plots" warning
+            AddLineSeries("dummy", Color.Transparent, 1, LineStyle.Solid);
+        }
+
+        // ────────────────────────────────────── MAIN LOGIC ──────────────────────────────────────
+        public override void OnUpdate(UpdateArgs args)
+        {
+            if (Count < 2) return;
+
+            DateTime nowNY = Core.Instance.TimeUtils.DateTimeUtcToNY(CurrentBar.TimeLeft);
+
+            var zones = new[]
+            {
+                new Killzone("Asia",      "200000-235959", ShowAsia,      AsiaColor,      "20:00–00:00"),
+                new Killzone("London",    "020000-045959", ShowLondon,    LondonColor,    "02:00–05:00"),
+                new Killzone("NY Forex",  "070000-095959", ShowNYForex,   NYForexColor,   "07:00–10:00"),
+                new Killzone("NY Indices","093000-105959", ShowNYIndices, NYIndicesColor, "09:30–11:00")
+            };
+
+            foreach (var kz in zones)
+            {
+                if (!kz.Enabled) continue;
+
+                DateTime sessionStartNY = nowNY.Date.AddHours(int.Parse(kz.SessionStart.Substring(0, 2)));
+                bool isActive = IsInSession(nowNY, kz.SessionStart, kz.SessionEnd);
+
+                // --- Session Rectangle ---
+                string rectName = $"KZ_Rect_{kz.Name}";
+                var rect = GetOrCreateRectangle(rectName);
+                rect.Left   = sessionStartNY;
+                rect.Right  = isActive ? CurrentBar.TimeLeft.AddMinutes(1) : sessionStartNY.AddMinutes(1);
+                rect.Top    = GetSessionHigh(sessionStartNY, nowNY);
+                rect.Bottom = GetSessionLow(sessionStartNY, nowNY);
+                rect.Color  = Color.FromArgb(BoxTransparency, kz.BoxColor);
+                rect.Text   = ShowLabels ? kz.Label : "";
+                rect.TextColor = Color.White;
+                rect.BorderColor = Color.FromArgb(200, kz.BoxColor);
+
+                // --- Pivots (only draw once session is closed) ---
+                if (ShowPivots && !isActive && rect.Top > rect.Bottom)
+                {
+                    string prefix = $"KZ_{kz.Name.Replace(' ', '_')}";
+
+                    DrawHorizontalLine($"{prefix}_High", rect.Top,    kz.BoxColor, PivotWidth, LineStyle.Solid);
+                    DrawHorizontalLine($"{prefix}_Low",  rect.Bottom, kz.BoxColor, PivotWidth, LineStyle.Solid);
+
+                    if (ShowMidpoint)
+                    {
+                        double mid = (rect.Top + rect.Bottom) / 2.0;
+                        DrawHorizontalLine($"{prefix}_Mid", mid, Color.FromArgb(150, kz.BoxColor), 1, LineStyle.Dotted);
+                    }
+                }
+            }
+        }
+
+        // ────────────────────────────────────── HELPER CLASSES & METHODS ──────────────────────────────────────
+        private class Killzone
+        {
+            public string Name { get; }
+            public string SessionStart { get; }
+            public string SessionEnd { get; }
+            public bool Enabled { get; }
+            public Color BoxColor { get; }
+            public string Label { get; }
+
+            public Killzone(string name, string session, bool enabled, Color color, string label)
+            {
+                Name = name;
+                SessionStart = session.Substring(0, 6);
+                SessionEnd   = session.Length > 6 ? session.Substring(7, 6) : SessionStart;
+                Enabled = enabled;
+                BoxColor = color;
+                Label = label;
+            }
+        }
+
+        private bool IsInSession(DateTime timeNY, string startStr, string endStr)
+        {
+            int start = int.Parse(startStr);
+            int end   = int.Parse(endStr);
+            int current = timeNY.Hour * 10000 + timeNY.Minute * 100 + timeNY.Second;
+
+            if (start <= end)
+                return current >= start && current <= end;
+            else // crosses midnight (Asia only)
+                return current >= start || current <= end;
+        }
+
+        private double GetSessionHigh(DateTime sessionStartNY, DateTime nowNY)
+        {
+            double high = double.MinValue;
+            for (int i = Count - 1; i >= 0; i--)
+            {
+                DateTime barTimeNY = Core.Instance.TimeUtils.DateTimeUtcToNY(HistoricalData[i].TimeLeft);
+                if (barTimeNY < sessionStartNY) break;
+                if (barTimeNY > nowNY) continue;
+                high = Math.Max(high, HistoricalData[i].High);
+            }
+            return high == double.MinValue ? Close(0) : high;
+        }
+
+        private double GetSessionLow(DateTime sessionStartNY, DateTime nowNY)
+        {
+            double low = double.MaxValue;
+            for (int i = Count - 1; i >= 0; i--)
+            {
+                DateTime barTimeNY = Core.Instance.TimeUtils.DateTimeUtcToNY(HistoricalData[i].TimeLeft);
+                if (barTimeNY < sessionStartNY) break;
+                if (barTimeNY > nowNY) continue;
+                low = Math.Min(low, HistoricalData[i].Low);
+            }
+            return low == double.MaxValue ? Close(0) : low;
+        }
+
+        private Rectangle GetOrCreateRectangle(string name)
+        {
+            var rect = GetRectangle(name);
+            if (rect == null)
+            {
+                rect = new Rectangle
+                {
+                    Name = name,
+                    ZIndex = -1,
+                    BorderWidth = 1,
+                    TextHorizontalAlign = HorizontalAlignment.Center,
+                    TextVerticalAlign = VerticalAlignment.Center
+                };
+                AddRectangle(rect);
+            }
+            return rect;
+        }
+    }
+}
